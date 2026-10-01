@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>HORTUS render comparison</title>
+<style>body{background:#06070b;color:#d7dcea;font:11px ui-monospace,Menlo,monospace;padding:12px}
+canvas{border:1px solid #333;margin:4px;image-rendering:pixelated}</style>
+</head>
+<body>
+<pre id="out">running…</pre>
+<canvas id="gl" width="220" height="140"></canvas>
+<canvas id="c2" width="220" height="140"></canvas>
+<div>
+<canvas id="glzoom" width="300" height="200"></canvas>
+</div>
+
+<script src="../js/core/util.js"></script>
+<script src="../js/core/rng.js"></script>
+<script src="../js/core/hex.js"></script>
+<script src="../js/render/palette.js"></script>
+<script src="../js/world/world.js"></script>
+<script src="../js/world/genome.js"></script>
+<script src="../js/world/brain.js"></script>
+<script src="../js/world/names.js"></script>
+<script src="../js/world/ecosystem.js"></script>
+<script src="../js/render/shaders.js"></script>
+<script src="../js/render/webgl.js"></script>
+<script src="../js/render/canvas2d.js"></script>
+
+<script>
+(function () {
+  var out = document.getElementById('out');
+  var world = new HX.World({ seed: 'orchard', w: 220, h: 140 });
+  var eco = new HX.Ecosystem(world, { seed: false });
+  HX.Palette.updateSun(0.42, world.weather, 0.5);
+
+  /* ---- what the world actually contains ---- */
+  var hist = world.biomeHistogram();
+  var land = 0, waterCells = 0, vegSum = 0, snowSum = 0;
+  for (var i = 0; i < world.grid.size; i++) {
+    if (world.water[i] > 0.02) waterCells++; else { land++; vegSum += world.veg[i]; }
+    snowSum += world.snow[i];
+  }
+  var lines = [];
+  lines.push('world: ' + world.w + 'x' + world.h + '  land ' + (land / world.grid.size * 100).toFixed(1) +
+    '%  meanVeg ' + (vegSum / land).toFixed(3) + '  meanSnow ' + (snowSum / world.grid.size).toFixed(3));
+  lines.push('sun: daylight ' + HX.Palette.Sun.daylight.toFixed(3) + ' night ' + HX.Palette.Sun.isNight +
+    ' ambient ' + HX.Palette.Sun.ambient.map(function (v) { return v.toFixed(0); }).join(',') +
+    ' light ' + HX.Palette.Sun.colour.map(function (v) { return v.toFixed(0); }).join(','));
+
+  /* ---- GPU ---- */
+  var glc = document.getElementById('gl');
+  var r = new HX.Renderer(glc);
+  if (!r.ok) { lines.push('webgl unavailable: ' + r.error.message); out.textContent = lines.join('\n'); return; }
+  r.width = 220; r.height = 140; r.canvas.width = 220; r.canvas.height = 140;
+  r.camera.scale = 1; r.camera.x = 110; r.camera.y = 52.5;
+  r.settings.bloom = 0; r.settings.grain = 0; r.settings.vignette = 0; r.settings.aberration = 0;
+  /* the FBO was sized before we forced the drawing buffer; rebuild it */
+  r.tScene = null;
+  r.resize = function () {};
+  var t = r.gl.createTexture();
+  r.gl.bindTexture(r.gl.TEXTURE_2D, t);
+  r.gl.texImage2D(r.gl.TEXTURE_2D, 0, r.gl.RGBA8, 220, 140, 0, r.gl.RGBA, r.gl.UNSIGNED_BYTE, null);
+  r.gl.texParameteri(r.gl.TEXTURE_2D, r.gl.TEXTURE_MIN_FILTER, r.gl.LINEAR);
+  r.gl.texParameteri(r.gl.TEXTURE_2D, r.gl.TEXTURE_MAG_FILTER, r.gl.LINEAR);
+  r.gl.texParameteri(r.gl.TEXTURE_2D, r.gl.TEXTURE_WRAP_S, r.gl.CLAMP_TO_EDGE);
+  r.gl.texParameteri(r.gl.TEXTURE_2D, r.gl.TEXTURE_WRAP_T, r.gl.CLAMP_TO_EDGE);
+  var fbo = r.gl.createFramebuffer();
+  r.gl.bindFramebuffer(r.gl.FRAMEBUFFER, fbo);
+  r.gl.framebufferTexture2D(r.gl.FRAMEBUFFER, r.gl.COLOR_ATTACHMENT0, r.gl.TEXTURE_2D, t, 0);
+  r.tScene = { tex: t, fbo: fbo, w: 220, h: 140 };
+  r.tBrightA = null; r.tBrightB = null;
+
+  r.draw(world, eco, { time: 4 });
+  var gl = r.gl;
+  var gpu = new Uint8Array(220 * 140 * 4);
+  gl.readPixels(0, 0, 220, 140, gl.RGBA, gl.UNSIGNED_BYTE, gpu);
+
+  /* ---- canvas2d ---- */
+  var c2c = document.getElementById('c2');
+  var r2 = new HX.Renderer2D(c2c);
+  r2.resize = function () {};
+  r2.dpr = 1; r2.width = 220; r2.height = 140;
+  c2c.width = 220; c2c.height = 140;
+  r2.camera.scale = 1; r2.camera.x = 110; r2.camera.y = 52.5;
+  r2._ensureBuffer(world);
+  r2.draw(world, eco, { time: 4 });
+  var cpu = r2.ctx.getImageData(0, 0, 220, 140).data;
+
+  /* ---- compare against the analytic truth ---- */
+  var sample = [[10, 10], [10, 60], [10, 110], [110, 5], [110, 40], [110, 70], [110, 100], [110, 132],
+                [200, 20], [200, 70], [60, 70], [150, 45]];
+  lines.push('');
+  lines.push('  col  row | biome        water  veg  |  GPU r,g,b        CPU r,g,b');
+  var err = 0;
+  for (var s = 0; s < sample.length; s++) {
+    var c = sample[s][0], rw = sample[s][1];
+    var idx = rw * 220 + c;
+    var o = idx * 4;
+    var g0 = gpu[o], g1 = gpu[o + 1], g2 = gpu[o + 2];
+    var c0 = cpu[o], c1 = cpu[o + 1], c2 = cpu[o + 2];
+    lines.push('  ' + String(c).padStart(4) + String(rw).padStart(5) +
+      ' | ' + HX.biomeName(world.biome[idx]).padEnd(12) +
+      world.water[idx].toFixed(2).padStart(6) + world.veg[idx].toFixed(2).padStart(6) +
+      '  |  ' + [g0, g1, g2].map(function (v) { return String(v).padStart(3); }).join(',') +
+      '     ' + [c0, c1, c2].map(function (v) { return String(v).padStart(3); }).join(','));
+    err += Math.abs(g0 - c0) + Math.abs(g1 - c1) + Math.abs(g2 - c2);
+  }
+  lines.push('');
+  lines.push('mean |GPU-CPU| over samples: ' + (err / (sample.length * 3)).toFixed(1));
+
+  /* mean luminance of each */
+  var glSum = 0, cpSum = 0;
+  for (var p = 0; p < 220 * 140; p++) {
+    var q = p * 4;
+    glSum += gpu[q] + gpu[q + 1] + gpu[q + 2];
+    cpSum += cpu[q] + cpu[q + 1] + cpu[q + 2];
+  }
+  lines.push('mean GPU luminance: ' + (glSum / (220 * 140 * 3)).toFixed(1) +
+             '   mean CPU luminance: ' + (cpSum / (220 * 140 * 3)).toFixed(1));
+
+  /* ---- debug channels: which raw field is actually being read? ---- */
+  lines.push('');
+  lines.push('debug channels (read from tScene FBO, so values are LINEAR,');
+  lines.push('                    readPixels row 0 = BOTTOM of the image):');
+  var PROBES = [[10, 10], [10, 60], [110, 40], [110, 70], [110, 100], [200, 70]];
+  function probe(label, mode) {
+    r.settings.debug = mode;
+    r.draw(world, eco, { time: 4 });
+    /* Read the scene FBO, not the default framebuffer: the canvas contents
+       are not reliably preserved between headless frames, and the FBO also
+       gives us the pre-tonemap linear values we actually want to reason
+       about. */
+    gl.bindFramebuffer(gl.FRAMEBUFFER, r.tScene.fbo);
+    var buf = new Uint8Array(220 * 140 * 4);
+    gl.readPixels(0, 0, 220, 140, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    function at(col, rowFromTop) {
+      var y = 140 - 1 - rowFromTop;
+      var o = (y * 220 + col) * 4;
+      return [buf[o], buf[o + 1], buf[o + 2]];
+    }
+    lines.push('  ' + label);
+    for (var s = 0; s < PROBES.length; s++) {
+      var p = PROBES[s];
+      var idx = p[1] * 220 + p[0];
+      lines.push('    (' + p[0] + ',' + p[1] + ') truth w=' + world.water[idx].toFixed(2) +
+        ' e=' + world.elev[idx].toFixed(2) + ' b=' + world.biome[idx] +
+        ' veg=' + world.veg[idx].toFixed(2) + '   ->  ' + at(p[0], p[1]).join(','));
+    }
+  }
+  probe('water (greyscale = water value)', 1);
+  probe('elevation (0.5 grey = sea level)', 2);
+  probe('albedo, before any lighting', 6);
+  probe('lighting factor alone (want ~1.0 in daylight)', 7);
+
+  /* An ASCII dump of a patch makes a checkerboard visible as numbers, which no
+     amount of squinting at a screenshot will do. */
+  lines.push('');
+  lines.push('GPU water channel, rows 20-31, cols 40-63 (deep ocean patch):');
+  r.settings.debug = 1;
+  r.draw(world, eco, { time: 4 });
+  gl.bindFramebuffer(gl.FRAMEBUFFER, r.tScene.fbo);
+  var dbuf = new Uint8Array(220 * 140 * 4);
+  gl.readPixels(0, 0, 220, 140, gl.RGBA, gl.UNSIGNED_BYTE, dbuf);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  for (var rr = 20; rr < 32; rr++) {
+    var line = '  ';
+    for (var cc = 40; cc < 64; cc++) {
+      var yy2 = 140 - 1 - rr;
+      var oo2 = (yy2 * 220 + cc) * 4;
+      line += String(dbuf[oo2]).padStart(4);
+    }
+    var ti = rr * 220 + 52;
+    line += '   truth water=' + world.water[ti].toFixed(3);
+    lines.push(line);
+  }
+  r.settings.debug = 0;
+  r.draw(world, eco, { time: 4 });
+  gl.bindFramebuffer(gl.FRAMEBUFFER, r.tScene.fbo);
+  var fin = new Uint8Array(220 * 140 * 4);
+  gl.readPixels(0, 0, 220, 140, gl.RGBA, gl.UNSIGNED_BYTE, fin);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  lines.push('  final scene (linear)');
+  for (var s2 = 0; s2 < PROBES.length; s2++) {
+    var p2 = PROBES[s2];
+    var yy = 140 - 1 - p2[1];
+    var oo = (yy * 220 + p2[0]) * 4;
+    lines.push('    (' + p2[0] + ',' + p2[1] + ')  ' + fin[oo] + ',' + fin[oo + 1] + ',' + fin[oo + 2]);
+  }
+
+  /* ---- now at the app's actual zoom, where the artefact appears -------- */
+  var W2 = 764, H2 = 900;
+  r.width = W2; r.height = H2;
+  r.canvas.width = W2; r.canvas.height = H2;
+  var t2 = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t2);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, W2, H2, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  var fbo2 = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo2);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t2, 0);
+  r.tScene = { tex: t2, fbo: fbo2, w: W2, h: H2 };
+  r.dpr = 1;
+  r.camera.scale = Math.min(W2 / 222, H2 / 107) ;
+  r.camera.x = 110; r.camera.y = 52.5;
+
+  lines.push('');
+  lines.push('at app zoom (' + r.camera.scale.toFixed(2) + ' device px/cell), uScale=' + r.camera.scale);
+  r.settings.debug = 0;
+  r.draw(world, eco, { time: 4 });
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo2);
+  var zbuf = new Uint8Array(W2 * H2 * 4);
+  gl.readPixels(0, 0, W2, H2, gl.RGBA, gl.UNSIGNED_BYTE, zbuf);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+  /* a patch of deep ocean, at world cell (20,20) */
+  var wcx = 20 + 0.5 * (20 & 1), wcy = 20 * 0.75;
+  var px0 = Math.round((wcx - r.camera.x) * r.camera.scale + W2 / 2);
+  var py0 = Math.round(H2 / 2 - (wcy - r.camera.y) * r.camera.scale);
+  lines.push('  final scene, 24x14 px at world cell (20,20) [deep ocean]:');
+  for (var yy3 = 0; yy3 < 14; yy3++) {
+    var line2 = '   ';
+    for (var xx = 0; xx < 24; xx++) {
+      var oy = H2 - 1 - (py0 + yy3);
+      var ox = px0 + xx;
+      if (oy < 0 || oy >= H2 || ox < 0 || ox >= W2) { line2 += '   .'; continue; }
+      var o3 = (oy * W2 + ox) * 4;
+      line2 += String(zbuf[o3]).padStart(4);
+    }
+    lines.push(line2);
+  }
+
+  /* packed biome texture sanity */
+  var btex = r.biomeTex;
+  gl.bindTexture(gl.TEXTURE_2D, btex);
+  var px = new Uint8Array(4 * 8);
+  gl.readPixels(0, 0, 8, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  lines.push('biome LUT row0 first 8: ' + Array.prototype.slice.call(px, 0, 32).join(','));
+  gl.readPixels(0, 1, 8, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  lines.push('biome LUT row1 first 8: ' + Array.prototype.slice.call(px, 0, 32).join(','));
+
+  /* world texture sanity — read back texA */
+  gl.bindTexture(gl.TEXTURE_2D, r.texATex);
+  var wpx = new Uint8Array(4 * 4);
+  gl.readPixels(110, 70, 4, 1, gl.RGBA, gl.UNSIGNED_BYTE, wpx);
+  lines.push('texA at (110,70): ' + Array.prototype.slice.call(wpx).join(',') +
+             '   expect elev~' + Math.round((0.5 + world.elev[70 * 220 + 110] * 0.5) * 255) +
+             ' water~' + Math.round(world.water[70 * 220 + 110] * 255) +
+             ' veg~' + Math.round(world.veg[70 * 220 + 110] * 255));
+
+  out.textContent = lines.join('\n');
+  document.title = 'compare done';
+})();
+</script>
+</body>
+</html>

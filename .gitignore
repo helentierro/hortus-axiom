@@ -1,0 +1,19 @@
+# Nothing here is generated. No build step, no dependencies, no node_modules.
+# The tests run against the source directly.
+node_modules/
+npm-debug.log*
+package-lock.json
+package.json
+
+# OS and editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+
+# Diagnostic screenshots and scratch output
+.tmp/
+*.png
+!docs/*.png

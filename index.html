@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>HORTUS &mdash; a machine for growing worlds</title>
+<meta name="description" content="A seeded, evolving artificial ecology you can program. Deterministic terrain, hydrology and climate; neural agents under selection; and AXIOM, a Lisp for interfering with it.">
+<link rel="stylesheet" href="css/main.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23070910'/%3E%3Ccircle cx='16' cy='16' r='9' fill='none' stroke='%237ef0c8' stroke-width='2'/%3E%3Ccircle cx='16' cy='7' r='2.4' fill='%23ffb05c'/%3E%3Ccircle cx='24' cy='20' r='1.8' fill='%23ff6b5c'/%3E%3Ccircle cx='8' cy='21' r='1.6' fill='%236cd0ff'/%3E%3C/svg%3E">
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════════════════ boot overlay -->
+<div id="boot" class="boot">
+  <div class="boot-inner">
+    <pre id="boot-text" class="boot-text"></pre>
+    <button id="boot-go" class="boot-go" hidden>ENTER THE GARDEN</button>
+    <div class="boot-note">audio starts on entry &middot; press <kbd>M</kbd> to mute</div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════ top bar -->
+<header class="bar">
+  <div class="brand">
+    <span class="brand-mark">&#9673;</span>
+    <span class="brand-name">HORTUS</span>
+    <span class="brand-sub">a machine for growing worlds</span>
+  </div>
+
+  <div class="bar-group" id="clock-group">
+    <div class="clock">
+      <span class="clock-year" id="stat-year">Y1</span>
+      <span class="clock-day" id="stat-day">d0</span>
+      <span class="clock-season" id="stat-season">Spring</span>
+    </div>
+    <canvas id="dial" class="dial" width="34" height="34" title="time of day and season"></canvas>
+  </div>
+
+  <div class="bar-group" id="pops">
+    <div class="pop-stat"><span class="pop-n" id="stat-pop">0</span><span class="pop-l">total</span></div>
+    <div class="pop-stat"><span class="pop-n" id="stat-graze">0</span><span class="pop-l">grazers</span></div>
+    <div class="pop-stat"><span class="pop-n" id="stat-stalk">0</span><span class="pop-l">stalkers</span></div>
+    <div class="pop-stat"><span class="pop-n" id="stat-gen">0</span><span class="pop-l">generation</span></div>
+    <div class="pop-stat"><span class="pop-n" id="stat-fps">60</span><span class="pop-l">fps</span></div>
+  </div>
+
+  <div class="bar-group bar-controls">
+    <button id="btn-play" class="btn btn-primary" title="Space">&#10074;&#10074;</button>
+    <button id="btn-step" class="btn" title="advance one day">&#9654;|</button>
+    <label class="speed" title="simulated days per second">
+      <span>speed</span>
+      <input type="range" id="speed" min="0" max="60" value="8">
+      <output id="speed-out">8/d</output>
+    </label>
+    <div class="seg" id="views" role="tablist" aria-label="view mode"></div>
+  </div>
+
+  <div class="bar-group bar-right">
+    <button id="btn-audio" class="btn btn-icon" title="Mute / unmute (M)">&#9834;</button>
+    <button id="btn-shot" class="btn btn-icon" title="Save a PNG of the view">&#9678;</button>
+    <button id="btn-keep" class="btn btn-icon" title="Keep this world: return to it after a reload" aria-pressed="false">&#127757;</button>
+    <button id="btn-manual" class="btn btn-icon" title="Manual (?)">?</button>
+    <button id="btn-panel" class="btn btn-icon only-narrow" title="Toggle panels">&#9776;</button>
+  </div>
+</header>
+
+<!-- ══════════════════════════════════════════════════════ body -->
+<main class="layout" id="layout">
+
+  <!-- ───────────────────────────────────────────── left: the world ── -->
+  <section class="pane pane-view">
+    <div class="view-wrap" id="view-wrap">
+      <canvas id="view"></canvas>
+      <div class="view-overlay" id="view-overlay"></div>
+      <div class="view-hud">
+        <div class="hud-left">
+          <span id="hud-seed">seed &mdash;</span>
+          <span id="hud-tile">0 px / cell</span>
+          <span id="hud-agents">0 creatures</span>
+        </div>
+        <div class="hud-right">
+          <span id="hud-weather">&mdash;</span>
+          <span id="hud-biome">&mdash;</span>
+        </div>
+      </div>
+      <div class="view-tools">
+        <button class="tool" data-tool="pan" title="pan (drag)">&#8596;</button>
+        <button class="tool" data-tool="inspect" title="inspect creatures">&#9673;</button>
+        <button class="tool" data-tool="blight" title="paint blight">&#9679;</button>
+        <button class="tool" data-tool="bloom" title="paint biomass">&#10047;</button>
+        <button class="tool" data-tool="quake" title="raise terrain">&#9651;</button>
+        <button class="tool" data-tool="fit" title="fit the whole world">&#9974;</button>
+      </div>
+      <div class="view-hint" id="view-hint">scroll to zoom &middot; drag to pan &middot; click a creature</div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────── middle: the AXIOM console ── -->
+  <section class="pane pane-code">
+    <div class="pane-head">
+      <div class="tabs" id="code-tabs" role="tablist">
+        <button class="tab is-active" data-tab="program" role="tab">program</button>
+        <button class="tab" data-tab="repl" role="tab">repl</button>
+        <button class="tab" data-tab="examples" role="tab">examples</button>
+      </div>
+      <div class="pane-actions">
+        <select id="example-select" class="select" aria-label="example program"></select>
+        <button id="btn-run" class="btn btn-primary" title="Ctrl+Enter">RUN &#9654;</button>
+        <button id="btn-clear" class="btn" title="clear the console">CLR</button>
+      </div>
+    </div>
+
+    <div class="tab-body" id="tab-program">
+      <div class="editor" id="editor"></div>
+      <div class="console" id="program-out"></div>
+    </div>
+
+    <div class="tab-body is-hidden" id="tab-repl">
+      <div class="repl" id="repl"></div>
+      <div class="repl-input">
+        <span class="repl-prompt">ax&gt;</span>
+        <input id="repl-field" class="repl-field" spellcheck="false" autocomplete="off"
+               aria-label="AXIOM input" placeholder="(+ 1 2)   (population)   (biome-name 9)">
+      </div>
+    </div>
+
+    <div class="tab-body is-hidden" id="tab-examples">
+      <div class="examples" id="examples"></div>
+    </div>
+  </section>
+
+  <!-- ───────────────────────────────────────────── right: instruments ── -->
+  <section class="pane pane-inst" id="pane-inst">
+    <div class="pane-head">
+      <div class="tabs" id="inst-tabs" role="tablist">
+        <button class="tab is-active" data-itab="species" role="tab">species</button>
+        <button class="tab" data-itab="charts" role="tab">charts</button>
+        <button class="tab" data-itab="agent" role="tab">agent</button>
+        <button class="tab" data-itab="log" role="tab">log</button>
+      </div>
+    </div>
+
+    <div class="tab-body" id="itab-species">
+      <div class="species" id="species"></div>
+      <div class="lineage-wrap">
+        <div class="sub-head">lineage</div>
+        <canvas id="lineage" class="lineage"></canvas>
+      </div>
+      <div class="hall">
+        <div class="sub-head">hall of fame</div>
+        <div id="hall" class="hall-list"></div>
+      </div>
+    </div>
+
+    <div class="tab-body is-hidden" id="itab-charts">
+      <div class="sub-head">population</div>
+      <canvas id="chart-pop" class="chart"></canvas>
+      <div class="sub-head">standing vegetation &amp; rainfall</div>
+      <canvas id="chart-veg" class="chart"></canvas>
+      <div class="sub-head">mean energy per creature</div>
+      <canvas id="chart-energy" class="chart"></canvas>
+      <div class="sub-head">world composition</div>
+      <canvas id="chart-biome" class="chart chart-bars"></canvas>
+    </div>
+
+    <div class="tab-body is-hidden" id="itab-agent">
+      <div class="inspector" id="inspector"></div>
+    </div>
+
+    <div class="tab-body is-hidden" id="itab-log">
+      <div class="log" id="log"></div>
+    </div>
+  </section>
+</main>
+
+<!-- ══════════════════════════════════════════════════════ manual -->
+<div class="modal" id="manual" hidden>
+  <div class="modal-inner">
+    <div class="modal-head">
+      <h2>HORTUS &mdash; manual</h2>
+      <button class="btn" id="manual-close">CLOSE</button>
+    </div>
+    <div class="modal-body" id="manual-body"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<script src="js/core/util.js"></script>
+<script src="js/core/rng.js"></script>
+<script src="js/core/hex.js"></script>
+<script src="js/render/palette.js"></script>
+<script src="js/world/world.js"></script>
+<script src="js/world/genome.js"></script>
+<script src="js/world/brain.js"></script>
+<script src="js/world/names.js"></script>
+<script src="js/world/ecosystem.js"></script>
+<script src="js/lang/reader.js"></script>
+<script src="js/lang/interp.js"></script>
+<script src="js/lang/builtins.js"></script>
+<script src="js/lang/stdlib.js"></script>
+<script src="js/render/shaders.js"></script>
+<script src="js/render/webgl.js"></script>
+<script src="js/render/canvas2d.js"></script>
+<script src="js/audio/audio.js"></script>
+<script src="js/ui/editor.js"></script>
+<script src="js/ui/panels.js"></script>
+<script src="js/ui/manual.js"></script>
+<script src="scripts/examples.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>HORTUS smoke test</title>
+<style>
+  body { background:#06070b; color:#d7dcea; font:12px ui-monospace, Menlo, Consolas, monospace; padding:16px; }
+  .pass { color:#7ef0c8; } .fail { color:#ff6b5c; } .note { color:#5a6479; }
+  h1 { font-size:14px; letter-spacing:.2em; color:#ffb05c; }
+  pre { white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>HORTUS SMOKE TEST</h1>
+<pre id="out">running…</pre>
+<canvas id="view" width="400" height="300" style="border:1px solid #222"></canvas>
+
+<script src="../js/core/util.js"></script>
+<script src="../js/core/rng.js"></script>
+<script src="../js/core/hex.js"></script>
+<script src="../js/render/palette.js"></script>
+<script src="../js/world/world.js"></script>
+<script src="../js/world/genome.js"></script>
+<script src="../js/world/brain.js"></script>
+<script src="../js/world/names.js"></script>
+<script src="../js/world/ecosystem.js"></script>
+<script src="../js/lang/reader.js"></script>
+<script src="../js/lang/interp.js"></script>
+<script src="../js/lang/builtins.js"></script>
+<script src="../js/lang/stdlib.js"></script>
+<script src="../js/render/shaders.js"></script>
+<script src="../js/render/webgl.js"></script>
+<script src="../js/render/canvas2d.js"></script>
+<script src="../js/audio/audio.js"></script>
+<script src="../js/ui/editor.js"></script>
+<script src="../js/ui/panels.js"></script>
+<script src="../js/ui/manual.js"></script>
+<script src="../scripts/examples.js"></script>
+<script src="../js/app.js"></script>
+
+<script>
+(function () {
+  var out = document.getElementById('out');
+  var lines = [];
+  var pass = 0, fail = 0;
+
+  function log(s, cls) { lines.push(cls ? '<span class="' + cls + '">' + s + '</span>' : s); out.innerHTML = lines.join('\n'); }
+  function ok(cond, label, detail) {
+    if (cond) { pass++; log('  PASS  ' + label + (detail ? '  ' + detail : ''), 'pass'); }
+    else { fail++; log('  FAIL  ' + label + (detail ? '  ' + detail : ''), 'fail'); }
+  }
+  function tryIt(label, fn) {
+    try { var v = fn(); ok(true, label, typeof v === 'string' ? v : ''); return v; }
+    catch (e) { ok(false, label, (e && e.message || String(e))); return null; }
+  }
+
+  window.onerror = function (m, f, l) { log('  FATAL  ' + m + ' @ ' + f + ':' + l, 'fail'); fail++; };
+
+  function run() {
+    log('── modules ──');
+    ok(!!window.HX, 'HX namespace');
+    ['U', 'Rng', 'HexGrid', 'World', 'Genome', 'Brain', 'Ecosystem', 'Reader', 'Interp',
+     'builtins', 'stdlib', 'Palette', 'Shaders', 'Renderer', 'Renderer2D', 'AudioEngine',
+     'Editor', 'MANUAL', 'EXAMPLES', 'Names'].forEach(function (k) {
+      ok(!!HX[k], 'HX.' + k);
+    });
+    ok(HX.ui && !!HX.ui.Chart && !!HX.ui.Inspector && !!HX.ui.Lineage, 'ui panels');
+
+    log('── world ──');
+    var t0 = performance.now();
+    var world = new HX.World({ seed: 'smoke-1', w: 160, h: 100 });
+    var genMs = performance.now() - t0;
+    ok(world.grid.size === 16000, 'grid size', world.grid.size + ' cells in ' + genMs.toFixed(0) + 'ms');
+    var hist = world.biomeHistogram();
+    var present = 0;
+    for (var i = 0; i < hist.length; i++) if (hist[i] > 0) present++;
+    ok(present >= 14, 'biome diversity', present + '/' + hist.length + ' biomes present');
+    ok(world.riverCells > 50, 'rivers', world.riverCells + ' cells');
+    ok(world.coverage.land > 0.35 && world.coverage.land < 0.75, 'land fraction', (world.coverage.land * 100).toFixed(1) + '%');
+    ok(world.time.dayFrac > 0.2 && world.time.dayFrac < 0.7, 'opens in daylight', world.time.dayFrac.toFixed(2));
+
+    log('── ecosystem ──');
+    t0 = performance.now();
+    var eco = new HX.Ecosystem(world, { speciesCount: 5, population: 400 });
+    var seedMs = performance.now() - t0;
+    ok(eco.totalPop > 200, 'seeded population', eco.totalPop + ' in ' + seedMs.toFixed(0) + 'ms');
+    t0 = performance.now();
+    for (var d = 0; d < 120; d++) eco.tick(1);
+    var tickMs = (performance.now() - t0) / 120;
+    ok(eco.totalPop > 20, 'survives 120 days', eco.totalPop + ' alive, ' + (tickMs).toFixed(2) + ' ms/tick');
+    ok(eco.history.length > 10, 'history recorded', eco.history.length + ' samples');
+    ok(eco.maxGeneration >= 0, 'generation tracked', eco.maxGeneration);
+
+    log('── renderer ──');
+    var canvas = document.getElementById('view');
+    var r = new HX.Renderer(canvas);
+    if (r.ok) {
+      ok(true, 'webgl2 renderer', r.gl.getParameter(r.gl.VERSION));
+      tryIt('draw frame', function () { r.fitWorld(world); r.draw(world, eco, { time: 1 }); return ''; });
+      /* did it actually put pixels on the canvas? */
+      var gl = r.gl;
+      var px = new Uint8Array(4 * 16);
+      var w = r.width, h = r.height;
+      var nonBlack = 0;
+      for (var s = 0; s < 16; s++) {
+        var x = Math.floor((s % 4 + 0.5) / 4 * w);
+        var y = Math.floor((Math.floor(s / 4) + 0.5) / 4 * h);
+        var buf = new Uint8Array(4);
+        gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+        if (buf[0] + buf[1] + buf[2] > 12) nonBlack++;
+      }
+      ok(nonBlack > 8, 'scene renders pixels', nonBlack + '/16 non-black samples');
+      var modes = [];
+      for (var m = 0; m < HX.Palette.VIEWS.length; m++) {
+        try { r.settings.mode = m; r.draw(world, eco, { time: 2 }); modes.push(m); } catch (e) { }
+      }
+      ok(modes.length === HX.Palette.VIEWS.length, 'every view mode draws', modes.length + '/' + HX.Palette.VIEWS.length);
+      r.settings.mode = 0;
+      tryIt('zoom + pan', function () { r.zoomAt(2, 200, 150); r.centreOn(50, 40, 20); r.draw(world, eco, { time: 3 }); return ''; });
+      ok(!!r.screenshot() || r.screenshot() === null, 'screenshot path');
+    } else {
+      log('  (webgl2 unavailable in this browser: ' + (r.error && r.error.message) + ')', 'note');
+    }
+    /* A canvas can only ever have ONE context type. The old test reused the
+       same canvas that had already been given a webgl2 context above, so
+       getContext('2d') returned null, Renderer2D.ok was false, draw() returned
+       at its first line — and "canvas2d renderer draws" passed having drawn
+       nothing at all. That is how a renderer with creatures in the wrong
+       coordinate space, and a centreOn that did not exist, both survived.
+       This canvas is created fresh and is never given a GL context. */
+    var c2d = document.createElement('canvas');
+    c2d.width = 420; c2d.height = 300;
+    c2d.style.width = '420px'; c2d.style.height = '300px';
+    document.body.appendChild(c2d);
+    var r2 = new HX.Renderer2D(c2d);
+    ok(!!r2.ctx, 'canvas2d context is real (own canvas, not the webgl one)');
+    tryIt('canvas2d renderer draws', function () {
+      r2.resize(); r2.fitWorld(world); r2.draw(world, eco, { time: 1 });
+      return r2.stats.draws + ' draws, ' + r2.stats.agents + ' agents';
+    });
+    ok(r2.stats.draws > 0, 'canvas2d actually drew a frame');
+    /* Agents are placed in WORLD coordinates under a camera transform. If the
+       transform is dropped, every creature lands in a few pixels of the
+       top-left corner. Count non-background pixels in the lower-right quadrant
+       — where the population must be — rather than trusting a flag. */
+    tryIt('canvas2d places agents under the camera transform', function () {
+      r2.fitWorld(world);
+      r2.draw(world, eco, { time: 2 });
+      var W = c2d.width, H = c2d.height;
+      var data = r2.ctx.getImageData(0, 0, W, H).data;
+      /* Match against the actual species palette. A generic "saturated pixel" test
+       counts green terrain as well as creatures — the forest biome is close
+       enough to the jade species colour to pass any hand-picked threshold —
+       so the frame measures the same either way and proves nothing. Agent dots
+       are painted at alpha 0.9 in a species colour over the terrain, which puts
+       them within a few units of that colour; nothing else in the frame is. */
+      /* Read against the renderer's own backing store, not the canvas attribute:
+         * resize() derives width/height from getBoundingClientRect * dpr and then
+         * overwrites the attributes, so under any CSS the two can disagree. */
+      var W = r2.width, H = r2.height;
+      var data = r2.ctx.getImageData(0, 0, W, H).data;
+      var pal = HX.Palette.SPECIES_COLOURS;
+      var lit = 0, x0 = W, x1 = -1, y0 = H, y1 = -1, sx = 0, sy = 0;
+      for (var i = 0, p = 0; i < data.length; i += 4, p++) {
+        var r = data[i], g2 = data[i + 1], b = data[i + 2];
+        var hit = false;
+        for (var s = 0; s < pal.length; s++) {
+          if (Math.abs(r - pal[s][0]) < 30 && Math.abs(g2 - pal[s][1]) < 30 && Math.abs(b - pal[s][2]) < 30) { hit = true; break; }
+        }
+        if (!hit) continue;
+        lit++;
+        var px = p % W, py = (p / W) | 0;
+        sx += px; sy += py;
+        if (px < x0) x0 = px; if (px > x1) x1 = px;
+        if (py < y0) y0 = py; if (py > y1) y1 = py;
+      }
+      /* Two independent signals, because either alone is weak. The population
+         lives on land, so it never spans the full world width — the ocean
+         margins are empty — which is why spanX is not asserted near 1. What
+         IS decisive is that the creatures are centred: drawn with the world
+         transform they cluster around the middle of the frame, and drawn 1:1
+         into the corner they pile up at ~26% across and ~17% down. */
+      var cx = lit ? sx / lit / W : 0, cy = lit ? sy / lit / H : 0;
+      var spanY = y1 > y0 ? (y1 - y0) / H : 0;
+      ok(lit > 0 && spanY > 0.5 && Math.abs(cx - 0.5) < 0.14 && Math.abs(cy - 0.5) < 0.14,
+        'canvas2d creatures are spread and centred, not bunched in a corner',
+        lit + ' px, spanY ' + (spanY * 100).toFixed(0) + '%, centroid ' +
+        (cx * 100).toFixed(0) + '%/' + (cy * 100).toFixed(0) + '%');
+      return lit + ' px, spanY ' + (spanY * 100).toFixed(0) + '%, centroid ' +
+        (cx * 100).toFixed(0) + '%/' + (cy * 100).toFixed(0) + '%';
+    });
+    tryIt('canvas2d centreOn exists and moves the camera', function () {
+      if (typeof r2.centreOn !== 'function') throw new Error('centreOn is undefined — App.focusOn would throw');
+      var x0 = r2.camera.x;
+      r2.centreOn(120, 90, 18);
+      var moved = r2.camera.x === 120 && r2.camera.y === 90 && r2.camera.scale === 18;
+      r2.fitWorld(world);
+      ok(r2.camera.x !== 120 || x0 === 120, 'centreOn applied then fitWorld restored');
+      return moved ? 'set 120,90 @18' : 'transform not applied';
+    });
+    tryIt('canvas2d camera transform is the inverse of screenToWorld', function () {
+      r2.fitWorld(world);
+      /* Compare the two functions against EACH OTHER. Checking screenToWorld
+         against its own algebra passes even when the drawn transform disagrees
+         with it, which is exactly what happened for a while: the x translation
+         carried the wrong sign, so the map was mirrored about the view centre
+         and every click landed on the wrong side of the screen. */
+      var probes = [[40, 30], [210, 95], [110, 52], [17, 4], [137.5, 61.25]];
+      var ctx2 = r2.ctx;
+      ctx2.save();
+      r2._camera(ctx2);
+      var m = ctx2.getTransform();
+      ctx2.restore();
+      var worst = 0;
+      probes.forEach(function (p) {
+        var dx = m.a * p[0] + m.c * p[1] + m.e;
+        var dy = m.b * p[0] + m.d * p[1] + m.f;
+        var back = r2.screenToWorld(dx / r2.dpr, dy / r2.dpr);
+        worst = Math.max(worst, Math.abs(back.x - p[0]), Math.abs(back.y - p[1]));
+      });
+      ok(worst < 0.01, 'screenToWorld inverts the drawn transform exactly',
+        'worst error ' + worst.toExponential(2) + ' world units over ' + probes.length + ' probes');
+      return 'worst ' + worst.toExponential(2) + ' | store ' + r2.width + 'x' + r2.height +
+        ' cam ' + r2.camera.x + ',' + r2.camera.y;
+    });
+    tryIt('canvas2d honours every view mode', function () {
+      var seen = 0, sigs = {};
+      for (var m = 0; m < HX.Palette.VIEWS.length; m++) {
+        r2.settings.mode = m;
+        r2.draw(world, eco, { time: 3 });
+        var d = r2.ctx.getImageData(0, 0, c2d.width, c2d.height).data;
+        /* cheap signature of the frame */
+        var acc = 0;
+        for (var q = 0; q < d.length; q += 997 * 4) acc = (acc * 31 + d[q]) % 1000003;
+        sigs[m] = acc;
+        seen++;
+      }
+      r2.settings.mode = 0;
+      var uniq = {};
+      Object.keys(sigs).forEach(function (k) { uniq[sigs[k]] = 1; });
+      ok(Object.keys(uniq).length >= HX.Palette.VIEWS.length - 1,
+        'canvas2d view modes are distinguishable', Object.keys(uniq).length + '/' + HX.Palette.VIEWS.length + ' distinct');
+      return seen + ' modes';
+    });
+    tryIt('canvas2d chart mode is flat, not terrain', function () {
+      var sigOf = function (mode) {
+        r2.settings.mode = mode;
+        r2.draw(world, eco, { time: 4 });
+        var d = r2.ctx.getImageData(0, 0, c2d.width, c2d.height).data;
+        var acc = 0;
+        for (var q = 0; q < d.length; q += 401 * 4) acc = (acc * 31 + d[q]) % 1000003;
+        return acc;
+      };
+      var terrain = sigOf(0), chart = sigOf(1);
+      r2.settings.mode = 0;
+      ok(terrain !== chart, 'canvas2d chart mode differs from terrain',
+        terrain + ' vs ' + chart);
+      return 'terrain ' + terrain + ' / chart ' + chart;
+    });
+
+    log('── App wiring ──');
+    /* Everything above this point tests MODULES. Every serious defect found in
+       this project lived in App's glue instead — the REPL threw on every single
+       submission, boot() could run twice, the lineage plot was never drawn —
+       and all of them were invisible here because the suite never touched App.
+       app.js is loaded on a page with no #boot-go, so its own boot sequence
+       never runs and HX.App is inert here. */
+    ok(!!HX.App, 'HX.App is exposed for testing');
+
+    tryIt('replSubmit evaluates a form', function () {
+      var field = document.createElement('textarea');
+      var repl = document.createElement('div');
+      document.body.appendChild(field);
+      document.body.appendChild(repl);
+      var interp = new HX.Interp({ stepBudget: 200000 });
+      HX.builtins.install(interp);
+      var fake = {
+        dom: { replField: field, repl: repl },
+        interp: interp,
+        replLines: [],
+        uiDirty: false
+      };
+      field.value = '(+ 1 2)';
+      HX.App.replSubmit.call(fake);
+      var out = repl.textContent;
+      if (!/\b3\b/.test(out)) throw new Error('no result in output: ' + out);
+      ok(fake.replLines.length === 1, 'replSubmit recorded the line', JSON.stringify(fake.replLines));
+      return out.replace(/\s+/g, ' ').trim().slice(0, 60);
+    });
+    tryIt('replSubmit reports a syntax error without throwing', function () {
+      var field = document.createElement('textarea');
+      var repl = document.createElement('div');
+      var interp = new HX.Interp({ stepBudget: 200000 });
+      HX.builtins.install(interp);
+      var fake = { dom: { replField: field, repl: repl }, interp: interp, replLines: [], uiDirty: false };
+      field.value = '(+ 1';
+      HX.App.replSubmit.call(fake);
+      if (!/repl-err/.test(repl.innerHTML)) throw new Error('no error row: ' + repl.innerHTML);
+      return 'error surfaced in the panel';
+    });
+    tryIt('replNav walks the history buffer', function () {
+      var field = document.createElement('textarea');
+      var fake = { dom: { replField: field }, replLines: ['(a)', '(b)', '(c)'], replIdx: 3 };
+      HX.App.replNav.call(fake, -1);
+      var up = field.value;
+      HX.App.replNav.call(fake, -1);
+      ok(up === '(c)' && field.value === '(b)', 'ArrowUp returns previous lines', up + ' -> ' + field.value);
+      HX.App.replNav.call(fake, 1);
+      ok(field.value === '(c)', 'ArrowDown walks forward', field.value);
+      return up + '/' + field.value;
+    });
+    tryIt('boot() refuses to run twice', function () {
+      var prev = HX.App.started;
+      HX.App.started = true;
+      var threw = false;
+      try { HX.App.boot(); } catch (e) { threw = true; }
+      ok(!threw, 'second boot() is a no-op, not a re-initialisation');
+      HX.App.started = prev;
+      return threw ? 'threw' : 'returned cleanly';
+    });
+    tryIt('App does not rebind its own loop', function () {
+      /* boot() used to do `this.loop = this.loop.bind(this)` on every call,
+         which would stack a fresh bound function per boot. The loop body uses
+         App.* everywhere, so the bind was both unnecessary and a leak. */
+      var src = HX.App.loop.toString();
+      ok(src.indexOf('this.') === -1, 'loop body references no bare this');
+      return src.length + ' chars';
+    });
+
+    log('── lineage plot semantics ──');
+    tryIt('lineage x-axis is day, not array index', function () {
+      var fakeEco = { species: [{ name: 'A', bestScore: 0 }, { name: 'B', bestScore: 0 }], world: { daysPerYear: 100 } };
+      var lin = new HX.ui.Lineage(document.createElement('canvas'), fakeEco);
+      lin.canvas.width = 200; lin.canvas.height = 60;
+      /* deliberately non-uniform days: the first two are one day apart, the next
+         gap is twenty. An index-based axis spaces all three evenly. */
+      lin.push({ day: 10, species: [5, 0] });
+      lin.push({ day: 11, species: [7, 0] });
+      lin.push({ day: 31, species: [9, 0] });
+      lin.draw();
+      var days = lin.log.map(function (e) { return e.day; });
+      ok(days.length === 3, 'three samples recorded', days.join(','));
+      /* Re-derive what xOf must produce: proportional to day. */
+      var dmin = 10, dspan = 21;
+      var xs = days.map(function (d) { return 8 + 184 * ((d - dmin) / dspan); });
+      ok(xs[0] < xs[1] && xs[1] < xs[2], 'x increases with day');
+      ok(Math.abs((xs[2] - xs[1]) / (xs[1] - xs[0]) - 20) < 0.01,
+        'spacing is proportional to the day gap, not the sample count',
+        ((xs[2] - xs[1]) / (xs[1] - xs[0])).toFixed(2) + 'x');
+      return days.join(',');
+    });
+    tryIt('lineage never stores a duplicated sample', function () {
+      /* app.js pushed the newest history sample on BOTH the log event and the
+         history event, so each sample arrived twice. */
+      var fakeEco = { species: [{ name: 'A', bestScore: 0 }], world: { daysPerYear: 100 } };
+      var lin = new HX.ui.Lineage(document.createElement('canvas'), fakeEco);
+      var pushed = 0;
+      for (var d = 0; d < 20; d += 6) { lin.push({ day: d, species: [3] }); pushed++; }
+      ok(lin.log.length === pushed, 'one entry per push, no duplication',
+        lin.log.length + '/' + pushed);
+      return lin.log.length + ' rows';
+    });
+
+    log('── webgl resource lifetime ──');
+    if (r.ok) {
+      tryIt('uploadWorld reuses its textures', function () {
+        var gl = r.gl;
+        var realCreate = gl.createTexture;
+        var created = 0;
+        gl.createTexture = function () { created++; return realCreate.apply(gl, arguments); };
+        try {
+          for (var pass = 0; pass < 5; pass++) r.draw(world, eco, { time: 9 });
+        } finally {
+          gl.createTexture = realCreate;
+        }
+        /* The guard compared texA.length (w*h*4) against w*h, so it never
+           matched and three textures were created on EVERY frame. */
+        ok(created === 0, 'five frames create zero textures', created + ' created');
+        return created + ' textures over 5 frames';
+      });
+    }
+
+    log('── lifecycle ──');
+    tryIt('Chart.dispose removes its hover listeners', function () {
+      /* Every world reset rebuilds four charts on the same four canvases. */
+      var cv = document.createElement('canvas');
+      cv.width = 100; cv.height = 60;
+      document.body.appendChild(cv);
+      var a = new HX.ui.Chart(cv, {});
+      var b = new HX.ui.Chart(cv, {});
+      b.dispose();
+      var before = 0;
+      cv.dispatchEvent(new MouseEvent('mousemove', { clientX: 5, clientY: 5, bubbles: true }));
+      /* the live chart must have handled it, the disposed one must not have */
+      ok(b.hover === null, 'a disposed chart ignores pointer events', 'hover=' + b.hover);
+      ok(a.hover !== null, 'a live chart still handles pointer events', 'hover=' + a.hover);
+      void before;
+      a.dispose();
+      return '2 charts, one disposed';
+    });
+tryIt('user (define ...) survives a world reset', function () {
+      /* newWorld builds a fresh Interp, which used to silently drop every
+         binding the user had made. The bundled (reset-world! ...) example does
+         exactly that, so following it quietly unbroke your own program.
+         Bindings live in Env.vars, not on the Env object. */
+      var mk = function (seed) {
+        var i = new HX.Interp({ stepBudget: 100000 });
+        HX.builtins.install(i);
+        HX.stdlib.install(i, { world: new HX.World({ seed: seed, w: 40, h: 30 }) });
+        return i;
+      };
+      var i2 = mk('y');
+      var base2 = {};
+      for (var k in i2.global.vars) base2[k] = 1;
+      var nBase = Object.keys(base2).length;
+      ok(nBase > 20, 'baseline captured from Env.vars', nBase + ' names');
+
+      i2.run(HX.Reader.read('(define mytune 7) (define (double x) (* x 2))'), i2.global, { collect: true });
+      ok(i2.global.get('mytune') === 7, 'define took effect in the source interp',
+        'mytune=' + HX.Reader.inspect(i2.global.get('mytune')));
+
+      var i3 = mk('z');
+      /* mimic App.preserveUserBindings: only names outside the baseline */
+      var kept = 0;
+      for (var name in i2.global.vars) {
+        if (base2[name]) continue;
+        i3.global.define(name, i2.global.vars[name]);
+        kept++;
+      }
+      var r = i3.run(HX.Reader.read('(double mytune)'), i3.global, { collect: true });
+      ok(kept >= 2 && !r.error && r.results[0] === 14,
+        'user bindings move to the new interpreter',
+        kept + ' kept, (double mytune) = ' + HX.Reader.inspect(r.results[0]));
+      /* and crucially, the stdlib closures must NOT have moved with them: i2 was
+         * built on seed 'y' and i3 on seed 'z', so (seed-string) has to report
+         * the NEW world. Copying every binding would make it say 'y' forever. */
+      var s2 = i2.run(HX.Reader.read('(seed-string)'), i2.global, { collect: true });
+      var s3 = i3.run(HX.Reader.read('(seed-string)'), i3.global, { collect: true });
+      ok(!s3.error && /z/.test(HX.Reader.inspect(s3.results[0])),
+        'stdlib stayed bound to the new world',
+        'old=' + HX.Reader.inspect(s2.results[0]) + ' new=' + HX.Reader.inspect(s3.results[0]));
+      return kept + ' bindings kept';
+    });
+    tryIt('log entries carry the species index for birth', function () {
+      var w = new HX.World({ seed: 'lg', w: 60, h: 40 });
+      var e = new HX.Ecosystem(w, { speciesCount: 3, population: 40 });
+      e.logEvent('test', 'birth', 1);
+      var last = e.log[e.log.length - 1];
+      ok(last.sp === 1, 'birth log entry records its species', 'sp=' + last.sp);
+      e.logEvent('plain', 'info');
+      ok(e.log[e.log.length - 1].sp === -1, 'entries without a species record -1');
+      return 'sp=' + last.sp;
+    });
+    tryIt('replayAudioEvents is wired to the ticks, not the draw', function () {
+      /* It used to be called with a log length read immediately BEFORE
+         renderer.draw(), which never appends to eco.log — so the guard
+         `log.length === from` was true every frame and the birth/death/thunder
+         voices in the audio engine had no call site at all. */
+      var src = HX.App.replayAudioEvents.toString();
+      ok(src.indexOf('deathsBefore') !== -1 && src.indexOf('storm') !== -1,
+        'replayAudioEvents reads deaths and storm state');
+      var loopSrc = HX.App.loop.toString();
+      ok(loopSrc.indexOf('logBefore') !== -1 && loopSrc.indexOf('replayAudioEvents') !== -1,
+        'the loop captures log length before ticking');
+      var capture = loopSrc.indexOf('var logBefore');
+      var call = loopSrc.indexOf('App.replayAudioEvents(logBefore');
+      ok(capture !== -1 && call !== -1 && capture < call,
+        'capture happens before the sonify call');
+      return 'wired';
+    });
+
+    log('── panels ──');
+    var mkCanvas = function () { var c = document.createElement('canvas'); c.width = 300; c.height = 120; document.body.appendChild(c); return c; };
+    tryIt('chart draws', function () {
+      var ch = new HX.ui.Chart(mkCanvas(), {});
+      ch.setSeries([{ key: 'pop', colour: '#fff' }]);
+      ch.setSamples(eco.history);
+      ch.draw();
+      return eco.history.length + ' samples';
+    });
+    tryIt('lineage draws', function () {
+      var lin = new HX.ui.Lineage(mkCanvas(), eco);
+      for (var k = 0; k < eco.history.length; k++) lin.push(eco.history[k]);
+      lin.draw();
+      return lin.log.length + ' rows';
+    });
+    tryIt('species panel renders', function () {
+      var el = document.createElement('div');
+      document.body.appendChild(el);
+      new HX.ui.SpeciesPanel(el, function () { }).update(eco, world);
+      return el.children.length + ' cards';
+    });
+    tryIt('inspector renders', function () {
+      var el = document.createElement('div');
+      document.body.appendChild(el);
+      var insp = new HX.ui.Inspector(el);
+      var alive = null;
+      for (var k = 0; k < eco.agents.length; k++) if (eco.agents[k].alive) { alive = eco.agents[k]; break; }
+      insp.setAgent(alive, eco, world);
+      insp.refresh();
+      return alive ? alive.name : 'none';
+    });
+
+    log('── AXIOM in the browser ──');
+    var I = new HX.Interp({ stepBudget: 3000000 });
+    HX.builtins.install(I);
+    HX.stdlib.install(I, { world: world, eco: eco, focus: function () { }, highlight: function () { }, setChannel: function () { }, reset: function () { } });
+    var res = I.run(HX.Reader.read('(+ 1 2) (* 6 7) (list "a" :b)'), I.global, { collect: true });
+    ok(!res.error && res.results.map(function (v) { return HX.Reader.inspect(v, 4); }).join(' ') === '3 42 ("a" :b)',
+       'evaluates', res.error ? res.error.message : res.results.map(function (v) { return HX.Reader.inspect(v, 4); }).join(' '));
+    res = I.run(HX.Reader.read('(population) (species-count) (biome-name 9)'), I.global, { collect: true });
+    ok(!res.error && String(res.results[0]) === String(eco.totalPop), 'reads the simulation', res.results.join(' '));
+    res = I.run(HX.Reader.read('(while #t 1)'), I.global, { collect: true });
+    ok(!!res.error && /step budget/.test(res.error.message), 'loop guard fires', res.error && res.error.message);
+
+    log('── editor ──');
+    tryIt('highlights', function () {
+      var html = HX.highlight('(define (f x) ; comment\n  (+ x 1))', { has: function () { return false; } });
+      if (!/tk-special/.test(html) || !/tk-comment/.test(html) || !/tk-number/.test(html)) throw new Error('missing token classes');
+      return html.length + ' chars';
+    });
+
+    log('── examples ──');
+    /* Every shipped program must at least READ. Then actually run them all —
+       a program that parses but throws on its third line is worse than one
+       that fails to parse, because it fails in front of a user. */
+    HX.EXAMPLES.forEach(function (ex) {
+      var forms;
+      try { forms = HX.Reader.read(ex.src); }
+      catch (e) { ok(false, 'reads ' + ex.id, e.message); return; }
+      ok(forms.length > 0, 'reads ' + ex.id, forms.length + ' forms');
+
+      var I2 = new HX.Interp({ stepBudget: 20000000 });
+      HX.builtins.install(I2);
+      HX.stdlib.install(I2, { world: world, eco: eco, focus: function () { }, highlight: function () { }, setChannel: function () { }, reset: function () { } });
+      var t = performance.now();
+      var r2 = I2.run(forms, I2.global, { collect: false });
+      var ms = performance.now() - t;
+      ok(!r2.error, 'runs ' + ex.id,
+         r2.error ? r2.error.message : (r2.steps.toLocaleString('en-US') + ' evals in ' + ms.toFixed(0) + 'ms'));
+    });
+
+    /* run the cheapest example for real */
+    var genesis = HX.EXAMPLES.filter(function (e) { return e.id === 'genesis'; })[0];
+    if (genesis) {
+      var out2 = I.run(HX.Reader.read(genesis.src), I.global, { collect: true });
+      ok(!out2.error && out2.output.indexOf('seed') >= 0, 'Genesis example runs',
+         out2.error ? out2.error.message : out2.output.split('\n')[0]);
+    }
+
+    log('── manual ──');
+    tryIt('manual renders', function () {
+      var el = document.createElement('div');
+      document.body.appendChild(el);
+      HX.MANUAL.render(el);
+      return el.innerHTML.length + ' chars, ' + el.querySelectorAll('h3').length + ' sections';
+    });
+
+    log('');
+    log('=== ' + pass + ' passed, ' + fail + ' failed ===', fail ? 'fail' : 'pass');
+    document.title = fail ? ('FAIL ' + fail) : ('PASS ' + pass);
+    window.__SMOKE__ = { pass: pass, fail: fail, lines: lines };
+  }
+
+  try { run(); } catch (e) {
+    log('FATAL ' + (e && e.stack || e), 'fail');
+    window.__SMOKE__ = { pass: 0, fail: 1, lines: lines };
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+# Normalise line endings in the repository itself. Without this the working
+# copy differs between Windows and everywhere else and every file shows up as
+# modified on checkout.
+* text=auto eol=lf
+
+# Nothing in this project is generated, so nothing should be diffed as binary
+# by accident; these are text even though they carry bytes.
+*.js text
+*.css text
+*.html text
+*.md text
+
+# No line-ending translation for these two, if they are ever added.
+*.png binary
